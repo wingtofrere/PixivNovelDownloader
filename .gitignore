@@ -78,3 +78,8 @@ build/
 
 ### Node.js ###
 node_modules/
+/.tools/
+
+# Local verification artifacts (not source distribution).
+/reports/*.log
+/reports/BUILD_ARTIFACTS.json

@@ -27,6 +27,15 @@ public final class NovelSchemaContribution {
 
     private static SchemaContribution createContribution() {
         List<TableSpec> tables = List.of(
+                // Archive progress is a long-lived fact, retained even when the novel plugin is disabled.
+                new TableSpec("novel_archive_state", List.of(
+                        column("kind", "TEXT", true, null, 1),
+                        column("entry_key", "TEXT", true, null, 2),
+                        column("version", "INTEGER", true, "1", 0),
+                        column("state", "TEXT", true, "'PENDING'", 0),
+                        column("due", "INTEGER", true, "0", 0),
+                        column("payload", "TEXT", true, null, 0)),
+                        List.of(explicitIndex("idx_novel_archive_queue", false, "kind", "state", "due"))),
                 new TableSpec(
                         "novels",
                         List.of(

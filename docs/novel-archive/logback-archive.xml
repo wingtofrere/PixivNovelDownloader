@@ -1,0 +1,12 @@
+<configuration>
+  <appender name="ARCHIVE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>log/archive.log</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.FixedWindowRollingPolicy">
+      <fileNamePattern>log/archive.%i.log.gz</fileNamePattern>
+      <minIndex>1</minIndex><maxIndex>10</maxIndex>
+    </rollingPolicy>
+    <triggeringPolicy class="ch.qos.logback.core.rolling.SizeBasedTriggeringPolicy"><maxFileSize>10MB</maxFileSize></triggeringPolicy>
+    <encoder><charset>UTF-8</charset><pattern>%d{yyyy-MM-dd HH:mm:ss} %-5level %logger{40} - %msg%n</pattern></encoder>
+  </appender>
+  <root level="INFO"><appender-ref ref="ARCHIVE"/></root>
+</configuration>

@@ -1,0 +1,12 @@
+{
+  "enabled": false,
+  "dryRun": true,
+  "tags": ["拘束", "首輪"],
+  "excludedTags": ["AI生成", "BL", "男主人公"],
+  "maxChapters": 10,
+  "minDelaySeconds": 6,
+  "maxDelaySeconds": 15,
+  "maxPages": 1000,
+  "since": "2007-09-10",
+  "downloadCover": true
+}

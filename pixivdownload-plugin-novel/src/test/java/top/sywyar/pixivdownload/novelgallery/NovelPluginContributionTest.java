@@ -37,6 +37,7 @@ class NovelPluginContributionTest {
         assertThat(plugin.routes())
                 .extracting(route -> route.pathPattern())
                 .containsExactlyInAnyOrder(
+                        "/api/novel/archive/**",
                         "/api/novel/download",
                         "/api/novel/browser-import/**",
                         "/api/novel/status/**",

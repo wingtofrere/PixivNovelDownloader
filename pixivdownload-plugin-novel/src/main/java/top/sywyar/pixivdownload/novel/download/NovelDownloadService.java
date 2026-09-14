@@ -221,7 +221,7 @@ public class NovelDownloadService implements NovelDownloader {
 
             // Best-effort 内嵌图片下载（与正文同目录、embed_{id}.{ext}）；
             // 写入 HTML/EPUB 之前完成，使写入时即可解析为本地图片链接。
-            Map<String, String> embeddedExts = mediaDownloader.downloadEmbeddedImages(
+            Map<String, String> embeddedExts = other.isSkipEmbeddedImages() ? Map.of() : mediaDownloader.downloadEmbeddedImages(
                     novelId, rawContent, other.getEmbeddedImages(), downloadPath, request.getCookie(), status,
                     remainingImageBytes);
             ensureNotCancelled(status);
@@ -233,7 +233,7 @@ public class NovelDownloadService implements NovelDownloader {
             }
             String coverExt = mediaDownloader.downloadCover(
                     novelId, other.getCoverUrl(), downloadPath, baseName, request.getCookie(), status,
-                    remainingImageBytes);
+                    remainingImageBytes, other.getImageRequestDelayMs());
             ensureNotCancelled(status);
 
             // Write file

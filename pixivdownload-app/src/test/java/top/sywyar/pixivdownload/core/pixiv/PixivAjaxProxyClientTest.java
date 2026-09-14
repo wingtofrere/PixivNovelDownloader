@@ -29,6 +29,25 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 class PixivAjaxProxyClientTest {
 
     @Test
+    void preservesRetryAfterFromRateLimitResponse() {
+        RestTemplate template=new RestTemplate();
+        MockRestServiceServer server=MockRestServiceServer.bindTo(template).build();
+        URI uri=URI.create("https://www.pixiv.net/ajax/novel/42");
+        server.expect(requestTo(uri)).andRespond(withStatus(HttpStatus.TOO_MANY_REQUESTS).header("Retry-After","120"));
+        assertThatThrownBy(()->new PixivAjaxProxyClient(template).get(uri,null))
+                .isInstanceOfSatisfying(PixivAjaxException.class,e->assertThat(e.retryAfterMillis()).isEqualTo(120_000));
+        server.verify();
+    }
+    @Test
+    void parsesHttpDateAndRejectsInvalidRetryAfter() {
+        String future=java.time.ZonedDateTime.now(java.time.ZoneOffset.UTC).plusMinutes(5)
+                .format(java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME);
+        assertThat(PixivAjaxProxyClient.retryAfter(future)).isBetween(290_000L,300_000L);
+        assertThat(PixivAjaxProxyClient.retryAfter("invalid")).isZero();
+        assertThat(PixivAjaxProxyClient.retryAfter("-1")).isZero();
+    }
+
+    @Test
     @DisplayName("按原 URI 发送统一 AJAX 请求头并显式按 UTF-8 解码")
     void shouldUseExactUriAjaxHeadersAndUtf8() {
         URI uri = URI.create("https://www.pixiv.net/ajax/novel/42?lang=zh");

@@ -72,6 +72,7 @@ public class NovelPlugin implements PixivFeaturePlugin {
         // 默认会话/访客分支）。浏览器响应导入仅允许 LOCAL，控制器还会限制为真实 loopback 的 solo 模式。
         // 声明只为把这些写端点纳入本插件归属、随启停（禁用 → 新旧小说路径一并 404）。
         return List.of(
+                WebRouteContribution.admin("/api/novel/archive/**"),
                 WebRouteContribution.visitor("/api/novel/download"),
                 WebRouteContribution.local("/api/novel/browser-import/**"),
                 WebRouteContribution.visitor("/api/novel/status/**"),

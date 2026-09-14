@@ -86,7 +86,7 @@ import top.sywyar.pixivdownload.tts.narration.engine.NarrationVoiceSelector;
  * 均随 {@code plugins.novel.enabled} 装配或缺席。
  */
 @Configuration
-@Import(NovelExecutionConfiguration.class)
+@Import({NovelExecutionConfiguration.class, top.sywyar.pixivdownload.novel.archive.ArchiveConfiguration.class})
 public class NovelPluginConfiguration {
 
     @Bean

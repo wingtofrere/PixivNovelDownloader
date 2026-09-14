@@ -97,10 +97,21 @@ final class NovelDownloadMediaDownloader {
      */
     String downloadCover(long novelId, String coverUrl, Path downloadPath, String baseName, String cookie,
                          NovelDownloadStatus status, AtomicLong remainingImageBytes) {
+        return downloadCover(novelId, coverUrl, downloadPath, baseName, cookie, status, remainingImageBytes, 0);
+    }
+
+    String downloadCover(long novelId, String coverUrl, Path downloadPath, String baseName, String cookie,
+                         NovelDownloadStatus status, AtomicLong remainingImageBytes, int delayMs) {
         if (coverUrl == null || coverUrl.isBlank()) return null;
         URI referer = novelPageReferer(novelId);
         for (String candidateUrl : PixivCoverUrlResolver.downloadCandidates(coverUrl)) {
             ensureNotCancelled(status);
+            if (delayMs > 0) {
+                try { Thread.sleep(Math.min(delayMs, 3_600_000)); }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt(); throw new CancellationException("archive cover interrupted");
+                }
+            }
             String ext = downloadCoverCandidate(
                     candidateUrl, referer, downloadPath, baseName, cookie, status, remainingImageBytes);
             if (ext != null) {

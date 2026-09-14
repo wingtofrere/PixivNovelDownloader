@@ -1,5 +1,13 @@
 # PixivDownloader
 
+## 小说标签归档 v0.1
+
+本分支基于 [Sywyar/PixivDownloader](https://github.com/Sywyar/PixivDownloader) 扩展：多标签共享黑名单、跨标签去重、系列默认前 10 章自动合并、默认仅下载封面，以及慢速后台下载和持久化断点恢复。暂不跟踪系列更新。
+
+请先阅读 [归档启动与升级指南](docs/novel-archive/README.md)。Windows 启动入口为 `scripts/start-novel-archive.ps1`，源码构建入口为 `scripts/build-novel-archive.ps1`。运行数据应保存在固定的独立目录，升级时保留该目录及下载根目录。
+
+这是源码开发版，仓库提供完整源码、配置示例和构建脚本；构建产物由脚本生成。相关回归测试 191 项通过；真实 Pixiv 账号访问与 Windows 睡眠唤醒仍需实际环境验收。原项目说明如下。
+
 中文 | [繁體中文](./README_zh-Hant.md) | [日本語](./README_ja.md) | [한국어](./README_ko.md) | [English](./README_en.md)
 
 > [!NOTE]

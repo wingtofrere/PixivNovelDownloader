@@ -31,7 +31,8 @@ public class PixivAjaxProxyClient implements PixivAjaxClient {
         try {
             return exchange(uri, cookie);
         } catch (HttpStatusCodeException e) {
-            throw new PixivAjaxException(PixivAjaxFailure.HTTP_STATUS, e.getStatusCode().value());
+            throw new PixivAjaxException(PixivAjaxFailure.HTTP_STATUS, e.getStatusCode().value(),
+                    retryAfter(e.getResponseHeaders() == null ? null : e.getResponseHeaders().getFirst("Retry-After")));
         } catch (RestClientException e) {
             throw new PixivAjaxException(PixivAjaxFailure.TRANSPORT, 0);
         }
@@ -43,7 +44,8 @@ public class PixivAjaxProxyClient implements PixivAjaxClient {
                 response -> {
                     if (!response.getStatusCode().is2xxSuccessful()) {
                         throw new PixivAjaxException(
-                                PixivAjaxFailure.HTTP_STATUS, response.getStatusCode().value());
+                                PixivAjaxFailure.HTTP_STATUS, response.getStatusCode().value(),
+                                retryAfter(response.getHeaders().getFirst("Retry-After")));
                     }
                     int limit = responseLimit(uri);
                     long declaredLength = response.getHeaders().getContentLength();
@@ -66,6 +68,17 @@ public class PixivAjaxProxyClient implements PixivAjaxClient {
                 || path.startsWith("/ajax/novel/series_content/")
                 ? MAX_SERIES_RESPONSE_BYTES
                 : MAX_JSON_RESPONSE_BYTES;
+    }
+
+    static long retryAfter(String value) {
+        if (value == null) return 0L;
+        try { return Math.max(0L, Math.multiplyExact(Long.parseLong(value.trim()), 1000L)); }
+        catch (RuntimeException ignored) {
+            try { return Math.max(0L, java.time.ZonedDateTime.parse(value.trim(),
+                    java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME).toInstant().toEpochMilli()
+                    - System.currentTimeMillis()); }
+            catch (RuntimeException invalid) { return 0L; }
+        }
     }
 
     private static PixivAjaxException responseTooLarge() {

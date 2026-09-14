@@ -49,6 +49,24 @@ class DatabaseInitializerTest {
     }
 
     @Test
+    void releaseReinitializationRetainsArchiveCheckpointAndCompletedIdentity() throws Exception {
+        SingleConnectionDataSource ds=newDataSource();
+        try {
+            newInitializer(ds).initialize();
+            try(Connection c=ds.getConnection();Statement st=c.createStatement()) {
+                st.executeUpdate("INSERT INTO novel_archive_state(kind,entry_key,state,payload) VALUES('work','123','COMPLETED','{\"novelId\":123}')");
+                st.executeUpdate("INSERT INTO novel_archive_state(kind,entry_key,state,payload) VALUES('job','tag','PENDING','{\"page\":438}')");
+            }
+            newInitializer(ds).initialize();
+            try(Connection c=ds.getConnection();Statement st=c.createStatement();ResultSet r=st.executeQuery("SELECT state,payload FROM novel_archive_state ORDER BY kind")) {
+                assertThat(r.next()).isTrue();assertThat(r.getString(2)).contains("438");
+                assertThat(r.next()).isTrue();assertThat(r.getString(1)).isEqualTo("COMPLETED");
+                assertThat(r.next()).isFalse();
+            }
+        } finally {ds.destroy();}
+    }
+
+    @Test
     @DisplayName("全新库执行后应与受管 schema 完全匹配")
     void shouldCreateFreshDatabaseMatchingManagedSchema() throws Exception {
         SingleConnectionDataSource ds = newDataSource();
@@ -87,6 +105,7 @@ class DatabaseInitializerTest {
             try (Connection c = generatedDs.getConnection()) {
                 generated = snapshotSchema(c);
             }
+            assertThat(generated.remove("novel_archive_state")).isNotNull();
             assertThat(generated.keySet()).isEqualTo(legacy.keySet());
             for (Map.Entry<String, TableShape> entry : legacy.entrySet()) {
                 assertThat(generated.get(entry.getKey()))

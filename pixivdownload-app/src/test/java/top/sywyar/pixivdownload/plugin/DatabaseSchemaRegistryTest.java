@@ -54,8 +54,9 @@ class DatabaseSchemaRegistryTest {
         ManagedDatabaseSchema.DatabaseSchema merged = DatabaseSchemaRegistry.forBuiltInPlugins().mergedSchema();
         ManagedDatabaseSchema.DatabaseSchema baseline = LegacySchemaBaseline.spec();
 
-        assertThat(merged.tables().keySet())
-                .containsExactlyInAnyOrderElementsOf(baseline.tables().keySet());
+        java.util.Set<String> expectedTables=new java.util.HashSet<>(baseline.tables().keySet());
+        expectedTables.add("novel_archive_state");
+        assertThat(merged.tables().keySet()).containsExactlyInAnyOrderElementsOf(expectedTables);
         for (Map.Entry<String, ManagedDatabaseSchema.TableSpec> expected : baseline.tables().entrySet()) {
             ManagedDatabaseSchema.TableSpec actual = merged.tables().get(expected.getKey());
             assertThat(actual.columns())

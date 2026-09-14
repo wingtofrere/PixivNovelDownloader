@@ -55,6 +55,11 @@ public class NovelDownloadRequest {
         private String coverUrl;
         /** [uploadedimage:id] → pximg 原图 URL；可选。 */
         private Map<String, String> embeddedImages;
+        /** Archive requests can suppress embedded images without changing upstream defaults. */
+        private boolean skipEmbeddedImages;
+        /** Optional delay before every cover HTTP attempt (archive requests only). */
+        @com.fasterxml.jackson.annotation.JsonIgnore
+        private int imageRequestDelayMs;
         /** 下载完成后是否自动 AI 翻译（admin-only；游客请求会被控制器置 false）。 */
         private boolean autoTranslate;
         /** 自动翻译的目标语言自由文本（如 {@code english}）；{@code autoTranslate} 为真时使用。 */

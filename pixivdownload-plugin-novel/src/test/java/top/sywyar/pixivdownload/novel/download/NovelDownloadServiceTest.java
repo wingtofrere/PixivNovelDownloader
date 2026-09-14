@@ -146,6 +146,19 @@ class NovelDownloadServiceTest {
         return request;
     }
 
+    @Test
+    void archiveNeverRequestsEmbeddedImagesEvenWhenUrlsArePresent() throws Exception {
+        NovelDownloadRequest request=txtRequest(910L,null);
+        request.setContent("text[uploadedimage:99][pixivimage:123]");
+        request.getOther().setEmbeddedImages(Map.of("99","https://i.pximg.net/img-original/image.jpg"));
+        request.getOther().setSkipEmbeddedImages(true);
+        assertThat(service.downloadBlocking(request,null)).isTrue();
+        org.mockito.Mockito.verifyNoInteractions(pixivImageDownloader);
+        try(var files=Files.list(tempDir.resolve("novel-910"))) {
+            assertThat(files.map(p->p.getFileName().toString())).noneMatch(name->name.startsWith("embed_"));
+        }
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"txt", "html", "epub"})
     @DisplayName("下载格式应同时决定输出扩展名与数据库格式")

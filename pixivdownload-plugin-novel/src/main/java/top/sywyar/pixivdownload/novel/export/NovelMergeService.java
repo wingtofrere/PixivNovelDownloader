@@ -53,6 +53,38 @@ public class NovelMergeService {
         return seriesMergeLocks.computeIfAbsent(seriesId, k -> new Object());
     }
 
+    /** Archive export accepts an exact ordered selection; old chapters/images never leak into this edition. */
+    public MergeResult mergeArchive(long seriesId, List<Long> selected,
+                                    NovelDownloadService.NovelFormat format) throws IOException {
+        synchronized (mergeLockFor(seriesId)) {
+            if (selected.isEmpty()) return new MergeResult(false, "archive.no-allowed-chapters", null, 0);
+            List<NovelRecord> chapters = new ArrayList<>();
+            for (Long id : selected) {
+                NovelRecord chapter = novelDatabase.getNovel(id);
+                if (chapter == null || chapter.deleted() || !java.util.Objects.equals(chapter.seriesId(), seriesId))
+                    throw new IOException("Archive chapter missing or belongs to another series: " + id);
+                chapters.add(chapter);
+            }
+            NovelSeries series = novelDatabase.getSeries(seriesId);
+            String title = series == null || series.title() == null ? String.valueOf(seriesId) : series.title();
+            Path directory = Paths.get(downloadConfig.getRootFolder()).resolve("novel-series-" + seriesId).resolve("archive");
+            Files.createDirectories(directory);
+            Path output = directory.resolve("series-" + seriesId + "." + format.ext());
+            Path temporary = Files.createTempFile(directory, "archive-", ".tmp");
+            try {
+                switch (format) {
+                    case TXT -> writeTxt(temporary, title, chapters, null);
+                    case HTML -> writeHtml(temporary, title, chapters, null);
+                    case EPUB -> writeEpub(temporary, seriesId, title,
+                            series == null ? "" : series.description(), chapters, series, null, false);
+                }
+                Files.move(temporary, output, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } finally { Files.deleteIfExists(temporary); }
+            return new MergeResult(true, "archive.merged", output.toString(), chapters.size());
+        }
+    }
+
     /**
      * 合订整个系列：先生成原文基准合订本 {@code {title}.{ext}}，再为该系列已存在译文的每种语言重新生成
      * 语言变体合订本（best-effort）。译文章节会被替换，未翻译章节仍以原文出现。返回原文基准合订本的结果。
@@ -146,6 +178,25 @@ public class NovelMergeService {
         log.info("novel series merged: seriesId={}, format={}, lang={}, file={}",
                 seriesId, format.ext(), langCode == null ? "-" : langCode, outFile);
         return new MergeResult(true, messages.get("novel.merge.success"), outFile.toString(), chapters.size());
+    }
+
+    /** Publish the manifest last; retain obsolete all-excluded editions under a non-current name. */
+    public void writeArchiveManifest(long seriesId,String metadata,boolean empty) throws IOException {
+        synchronized(mergeLockFor(seriesId)) {
+            Path directory=Paths.get(downloadConfig.getRootFolder()).resolve("novel-series-"+seriesId).resolve("archive");
+            Files.createDirectories(directory);
+            if(empty)for(String extension:List.of("txt","epub")) {
+                Path old=directory.resolve("series-"+seriesId+"."+extension);
+                if(Files.exists(old))Files.move(old,directory.resolve("previous-policy-"+System.currentTimeMillis()+"-"+old.getFileName()),
+                        java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+            }
+            Path temporary=Files.createTempFile(directory,"metadata-",".tmp");
+            try {
+                Files.writeString(temporary,metadata,StandardCharsets.UTF_8);
+                Files.move(temporary,directory.resolve("metadata.json"),java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } finally {Files.deleteIfExists(temporary);}
+        }
     }
 
     /** 逐章取用的正文：变体取该语言译文（缺失回退原文），原文基准直接取 {@code raw_content}。 */
@@ -275,6 +326,12 @@ public class NovelMergeService {
     private void writeEpub(Path file, long seriesId, String seriesTitle, String seriesDescription,
                            List<NovelRecord> chapters, NovelSeries series,
                            String langCode) throws IOException {
+        writeEpub(file, seriesId, seriesTitle, seriesDescription, chapters, series, langCode, true);
+    }
+
+    private void writeEpub(Path file, long seriesId, String seriesTitle, String seriesDescription,
+                           List<NovelRecord> chapters, NovelSeries series, String langCode,
+                           boolean includeEmbeddedImages) throws IOException {
         List<NovelEpubWriter.Chapter> epubChapters = new ArrayList<>();
         List<NovelEpubWriter.NavEntry> nav = new ArrayList<>();
         // Pixiv uploadedimage id 全局唯一，跨章节用同一张 OEBPS/images/embed_{id}.{ext}
@@ -282,7 +339,7 @@ public class NovelMergeService {
         String firstLang = "ja";
         for (NovelRecord r : chapters) {
             String novelTitle = chapterTitleOf(r, langCode);
-            collectChapterImages(r, imagesById);
+            if (includeEmbeddedImages) collectChapterImages(r, imagesById);
             // 每本小说内部再按 [chapter:] 拆分，形成「小说 → 章节」两级目录
             List<NovelMarkupParser.Segment> segments = NovelMarkupParser.splitChapters(
                     contentOf(r, langCode));
@@ -317,7 +374,7 @@ public class NovelMergeService {
         byte[] epub = NovelEpubWriter.write(seriesTitle, resolveSeriesAuthor(series, chapters), epubLang,
                 identifier, epubChapters, nav,
                 new ArrayList<>(imagesById.values()),
-                readSeriesCover(series),
+                includeEmbeddedImages ? readSeriesCover(series) : readArchiveCover(series,chapters),
                 buildSeriesMetadata(seriesId, seriesTitle, seriesDescription),
                 epubLabels());
         Files.write(file, epub);
@@ -368,6 +425,21 @@ public class NovelMergeService {
      * 系列封面 {@code {coverFolder}/cover.{coverExt}} 读回字节，内嵌进合订 EPUB。
      * Best-effort：无封面记录 / 读失败一律返回 null（合订本不带封面页）。
      */
+    /** Reuse a downloaded chapter cover when the frozen series has no separate cover metadata. */
+    private NovelEpubWriter.Cover readArchiveCover(NovelSeries series,List<NovelRecord> chapters) {
+        NovelEpubWriter.Cover cover=readSeriesCover(series);
+        if(cover!=null)return cover;
+        for(NovelRecord chapter:chapters) {
+            if(chapter.coverExt()==null || chapter.folder()==null)continue;
+            try(var files=Files.list(Paths.get(chapter.folder()))) {
+                Path image=files.filter(p->p.getFileName().toString().endsWith("_thumb."+chapter.coverExt())).findFirst().orElse(null);
+                if(image!=null && Files.size(image)<=10*1024*1024)
+                    return new NovelEpubWriter.Cover(chapter.coverExt(),Files.readAllBytes(image));
+            } catch(IOException ignored) { /* A missing optional cover never removes text from an edition. */ }
+        }
+        return null;
+    }
+
     private NovelEpubWriter.Cover readSeriesCover(NovelSeries series) {
         if (series == null || series.coverExt() == null || series.coverExt().isBlank()
                 || series.coverFolder() == null || series.coverFolder().isBlank()) {
