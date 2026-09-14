@@ -56,6 +56,7 @@ public final class ArchiveRuntime implements SmartLifecycle {
             engine=factory.apply(settings);engine.initialize();
             credential=System.getenv("PIXIV_ARCHIVE_COOKIE");
             ObjectNode control=store.get("control","runtime"); paused=control!=null && control.path("paused").asBoolean();
+            status="STARTING";
             running=true;
             worker=new Thread(this::run,"pixiv-novel-archive");worker.setDaemon(true);worker.start();
         } catch(Exception e) {releaseLock();status="START_FAILED";throw new IllegalStateException("Archive startup failed; progress retained",e);}
@@ -68,7 +69,7 @@ public final class ArchiveRuntime implements SmartLifecycle {
                 if(now-previous>60_000) sleep(20_000); // Resume settling; all persisted due times are wall-clock based.
                 if(paused) status="PAUSED";
                 else if(credential==null || credential.isBlank()) status="AUTH_REQUIRED";
-                else {status=engine.tick(credential)?"RUNNING":"IDLE_OR_WAITING";}
+                else {status="RUNNING";status=engine.tick(credential)?"RUNNING":"IDLE_OR_WAITING";}
                 previous=System.currentTimeMillis();sleep(1000);
             }
         } catch(CancellationException ignored) {status="STOPPED";}

@@ -41,4 +41,18 @@ class ArchiveRuntimeTest {
             second.start();assertThat(second.status().get("paused")).isEqualTo(true);
         } finally {first.stop();second.stop();}
     }
+    @Test void firstBlockedRequestReportsRunningInsteadOfDisabled() throws Exception {
+        config("{\"enabled\":true,\"tags\":[\"A\"]}");
+        var entered=new java.util.concurrent.CountDownLatch(1);
+        var release=new java.util.concurrent.CountDownLatch(1);
+        var engine=mock(ArchiveEngine.class);
+        when(engine.tick(anyString())).thenAnswer(call->{entered.countDown();release.await();return true;});
+        var runtime=new ArchiveRuntime(new ArchiveStore(source(dir.resolve("db")),JSON),JSON,paths(),s->engine);
+        try {
+            runtime.start();runtime.resume("test-cookie");
+            assertThat(entered.await(5,java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            assertThat(runtime.status().get("status")).isEqualTo("RUNNING");
+            assertThat(runtime.isRunning()).isTrue();
+        } finally {release.countDown();runtime.stop();}
+    }
 }
