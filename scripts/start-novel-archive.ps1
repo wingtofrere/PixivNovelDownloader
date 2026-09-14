@@ -43,7 +43,13 @@ $setupComplete = $false
 if (Test-Path -LiteralPath $setupFile) { $setupComplete = (Get-Content -Raw -LiteralPath $setupFile | ConvertFrom-Json).setupComplete }
 if (-not $setupComplete) {
     Write-Host 'The upstream application requires one-time administrator setup before headless startup.'
-    $setupArguments = @($properties | Where-Object { $_ -ne '--no-gui' }) + @('--setup')
+    # CLI prompts are routed through Logback by the host. Use its console-enabled
+    # default during setup; the archive file-only logger would hide every prompt.
+    $setupArguments = @($properties | Where-Object {
+        $_ -ne '--no-gui' -and
+        $_ -notlike '-Dlogback.configurationFile=*' -and
+        $_ -notlike '-Dlogging.config=*'
+    }) + @('--setup')
     Push-Location $RuntimeDirectory
     try {
         & $java @setupArguments
