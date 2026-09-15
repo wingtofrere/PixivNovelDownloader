@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [string]$Endpoint = 'http://192.168.31.221:6999/api/novel/archive/status',
-    [ValidateRange(5, 3600)][int]$IntervalSeconds = 300,
+    [ValidateScript({ $_ -eq 0 -or ($_ -ge 5 -and $_ -le 3600) })][int]$IntervalSeconds = 0,
     [switch]$CheckOnly
 )
 $ErrorActionPreference = 'Stop'

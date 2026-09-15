@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.IO;
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Net;
 using System.Net.Http;
 using System.Text;
@@ -11,6 +14,7 @@ using System.Windows.Forms;
 namespace PixivArchiveMonitor {
     public sealed class Snapshot {
         public string Status; public bool Running;
+        public ProgressSnapshot Progress;
         public bool Healthy { get { return Status == "RUNNING" && Running; } }
         public string Key { get { return Status + "/" + Running; } }
         public override string ToString() { return "status: " + Status + ", running: " + Running.ToString().ToLowerInvariant(); }
@@ -20,7 +24,92 @@ namespace PixivArchiveMonitor {
                 !data.ContainsKey("running") || !(data["running"] is bool) ||
                 String.IsNullOrWhiteSpace((string)data["status"]) || ((string)data["status"]).Length > 128)
                 throw new FormatException("Response does not contain a valid status and running pair.");
-            return new Snapshot { Status = (string)data["status"], Running = (bool)data["running"] };
+            return new Snapshot { Status = (string)data["status"], Running = (bool)data["running"], Progress = ProgressSnapshot.Parse(data) };
+        }
+    }
+
+    public sealed class ProgressSnapshot {
+        public bool? DryRun, Paused;
+        public bool HasCounts;
+        public readonly SortedDictionary<string, long> Counts = new SortedDictionary<string, long>(StringComparer.Ordinal);
+        public readonly SortedDictionary<string, Dictionary<string, object>> Jobs = new SortedDictionary<string, Dictionary<string, object>>(StringComparer.Ordinal);
+        public string NetworkState = "No network state reported";
+        public long Discovered, Completed, Previewed, Skipped, Failed, Pending, RetryWaiting;
+        public long Processed { get { return Completed + Previewed + Skipped + Failed; } }
+        public bool CanSummarize { get { return HasCounts && DryRun.HasValue; } }
+        public static string Text(Dictionary<string, object> data, string key) {
+            object value; return data != null && data.TryGetValue(key, out value) && value != null ? Convert.ToString(value, CultureInfo.InvariantCulture) : "-";
+        }
+        private static long Count(object value) {
+            if (!(value is int) && !(value is long)) throw new FormatException("Count must be a nonnegative integer.");
+            long n = Convert.ToInt64(value); if (n < 0) throw new FormatException("Count cannot be negative."); return n;
+        }
+        public static ProgressSnapshot Parse(Dictionary<string, object> data) {
+            var result = new ProgressSnapshot(); object value;
+            if (data.TryGetValue("dryRun", out value) && value is bool) result.DryRun = (bool)value;
+            if (data.TryGetValue("paused", out value) && value is bool) result.Paused = (bool)value;
+            if (data.TryGetValue("counts", out value) && value is Dictionary<string, object>) {
+                result.HasCounts = true;
+                foreach (var pair in (Dictionary<string, object>)value) result.Counts.Add(pair.Key, Count(pair.Value));
+            }
+            if (result.CanSummarize) {
+                string prefix = result.DryRun.Value ? "dry-work:" : "work:";
+                checked {
+                    foreach (var pair in result.Counts) {
+                        if (!pair.Key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+                        result.Discovered += pair.Value;
+                        string kind = pair.Key.Substring(prefix.Length);
+                        if (kind == "COMPLETED") result.Completed += pair.Value;
+                        else if (kind == "DRY_RUN") result.Previewed += pair.Value;
+                        else if (kind.StartsWith("SKIPPED_", StringComparison.Ordinal)) result.Skipped += pair.Value;
+                        else if (kind == "FAILED") result.Failed += pair.Value;
+                        else if (kind == "RETRY_WAIT") result.RetryWaiting += pair.Value;
+                        else result.Pending += pair.Value;
+                    }
+                }
+            }
+            if (data.TryGetValue("jobs", out value) && value is Dictionary<string, object>) {
+                foreach (var pair in (Dictionary<string, object>)value) {
+                    var job = pair.Value as Dictionary<string, object>;
+                    result.Jobs.Add(pair.Key, job ?? new Dictionary<string, object>());
+                }
+            }
+            if (data.TryGetValue("network", out value) && value is Dictionary<string, object>) {
+                var network = (Dictionary<string, object>)value;
+                result.NetworkState = Text(network, "state");
+                object due;
+                if (network.TryGetValue("due", out due) && (due is int || due is long) && Convert.ToInt64(due) > 0) {
+                    try { result.NetworkState += " | retry: " + new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddMilliseconds(Convert.ToInt64(due)).ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss"); }
+                    catch (ArgumentOutOfRangeException) { result.NetworkState += " | retry time unavailable"; }
+                }
+            }
+            return result;
+        }
+    }
+
+    public static class MonitorPreferences {
+        public static string FilePath(string endpoint, string root) {
+            using (var hash = SHA256.Create()) {
+                return Path.Combine(root, "interval-" + BitConverter.ToString(hash.ComputeHash(Encoding.UTF8.GetBytes(endpoint))).Replace("-", "") + ".json");
+            }
+        }
+        public static int Load(string path, int fallback) {
+            try {
+                if (!File.Exists(path)) return fallback;
+                var data = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(path)) as Dictionary<string, object>;
+                object value;
+                if (data != null && data.TryGetValue("intervalSeconds", out value) && value is int && (int)value >= 5 && (int)value <= 3600) return (int)value;
+            } catch (Exception) { }
+            return fallback;
+        }
+        public static void Save(string path, int seconds) {
+            if (seconds < 5 || seconds > 3600) throw new ArgumentOutOfRangeException("seconds");
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try {
+                File.WriteAllText(temp, new JavaScriptSerializer().Serialize(new { intervalSeconds = seconds }), Encoding.UTF8);
+                if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+            } finally { if (File.Exists(temp)) File.Delete(temp); }
         }
     }
 
@@ -49,6 +138,7 @@ namespace PixivArchiveMonitor {
         private readonly Uri endpoint;
         private readonly HttpClient client;
         private readonly Timer timer = new Timer();
+        private readonly Timer clock = new Timer();
         private readonly ChangeTracker tracker = new ChangeTracker();
         private readonly Label state = new Label();
         private readonly TextBox username = new TextBox();
@@ -58,39 +148,66 @@ namespace PixivArchiveMonitor {
         private readonly Button stop = new Button();
         private readonly ListBox history = new ListBox();
         private readonly NotifyIcon tray = new NotifyIcon();
+        private readonly NumericUpDown intervalInput = new NumericUpDown();
+        private readonly Button refresh = new Button();
+        private readonly Label schedule = new Label();
+        private readonly Label summary = new Label();
+        private readonly Label progressNote = new Label();
+        private readonly Label preferenceNotice = new Label();
+        private readonly ProgressBar progress = new ProgressBar();
+        private readonly DataGridView jobs = new DataGridView();
+        private readonly DataGridView counts = new DataGridView();
+        private readonly string preferencesPath;
+        private DateTime nextCheckUtc = DateTime.MinValue, lastSuccessUtc = DateTime.MinValue;
+        private bool stale = true;
         private Form alert;
         private TextBox alertText;
         private bool busy, monitoring, quitting, authNotified;
-        private readonly int interval;
+        private int interval;
 
         public MonitorWindow(string address, int seconds) {
             endpoint = new Uri(address);
             if ((endpoint.Scheme != "http" && endpoint.Scheme != "https") || !String.IsNullOrEmpty(endpoint.UserInfo))
                 throw new ArgumentException("Use an HTTP(S) endpoint without credentials in its URL.");
-            if (seconds < 5 || seconds > 3600) throw new ArgumentException("Interval must be 5 to 3600 seconds.");
-            interval = seconds;
+            if (seconds != 0 && (seconds < 5 || seconds > 3600)) throw new ArgumentException("Interval must be 5 to 3600 seconds.");
+            preferencesPath = MonitorPreferences.FilePath(endpoint.ToString(), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PixivArchiveMonitor"));
+            interval = seconds == 0 ? MonitorPreferences.Load(preferencesPath, 300) : seconds;
             var handler = new HttpClientHandler { CookieContainer = new CookieContainer(), UseCookies = true,
                 AllowAutoRedirect = false, UseProxy = false };
             client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10), MaxResponseContentBufferSize = 1024 * 1024 };
             client.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
-            Text = "Pixiv Archive Monitor"; ClientSize = new Size(700, 425);
-            MinimumSize = new Size(716, 464); StartPosition = FormStartPosition.CenterScreen;
+            Text = "Pixiv Archive Monitor"; ClientSize = new Size(880, 720);
+            MinimumSize = new Size(896, 759); StartPosition = FormStartPosition.CenterScreen;
             Font = new Font("Segoe UI", 10); Icon = SystemIcons.Information;
-            var addressLabel = new Label { Text = endpoint.ToString(), Left = 16, Top = 14, Width = 670, Height = 40, AutoEllipsis = true };
-            Controls.Add(addressLabel);
-            Controls.Add(new Label { Text = "Downloader admin", Left = 16, Top = 60, Width = 140 });
-            username.SetBounds(158, 56, 180, 28); username.MaxLength = 128; Controls.Add(username);
-            Controls.Add(new Label { Text = "Password", Left = 350, Top = 60, Width = 80 });
-            password.SetBounds(430, 56, 180, 28); password.UseSystemPasswordChar = true; password.MaxLength = 1024; Controls.Add(password);
-            login.Text = "Sign in"; login.SetBounds(16, 97, 100, 30); login.Click += async (s, e) => await LoginAsync(); Controls.Add(login);
-            start.Text = "Start"; start.SetBounds(130, 97, 100, 30); start.Click += async (s, e) => { if (!busy) { monitoring = true; await CheckAsync(); } }; Controls.Add(start);
-            stop.Text = "Pause monitor"; stop.SetBounds(244, 97, 140, 30); stop.Click += (s, e) => { monitoring = false; timer.Stop(); SetState("Monitor paused locally. The downloader is unchanged."); }; Controls.Add(stop);
-            var hide = new Button { Text = "Minimize to tray", Left = 398, Top = 97, Width = 150, Height = 30 };
+            Controls.Add(new Label { Text = endpoint.ToString(), Left = 16, Top = 12, Width = 848, Height = 30, AutoEllipsis = true });
+            Controls.Add(new Label { Text = "Downloader admin", Left = 16, Top = 53, Width = 140 });
+            username.SetBounds(158, 49, 180, 28); username.MaxLength = 128; Controls.Add(username);
+            Controls.Add(new Label { Text = "Password", Left = 350, Top = 53, Width = 80 });
+            password.SetBounds(430, 49, 180, 28); password.UseSystemPasswordChar = true; password.MaxLength = 1024; Controls.Add(password);
+            login.Text = "Sign in"; login.SetBounds(624, 47, 100, 32); login.Click += async (s, e) => await LoginAsync(); Controls.Add(login);
+            start.Text = "Start"; start.SetBounds(16, 92, 100, 32); start.Click += async (s, e) => { if (!busy) { monitoring = true; await CheckAsync(); } }; Controls.Add(start);
+            stop.Text = "Pause monitor"; stop.SetBounds(130, 92, 140, 32); stop.Click += (s, e) => { monitoring = false; timer.Stop(); nextCheckUtc = DateTime.MinValue; SetState("Monitor paused locally. The downloader is unchanged."); UpdateClock(); }; Controls.Add(stop);
+            refresh.Name = "RefreshNow"; refresh.Text = "Refresh now"; refresh.SetBounds(284, 92, 130, 32);
+            refresh.Click += async (s, e) => await CheckAsync(true); Controls.Add(refresh);
+            var hide = new Button { Text = "Minimize to tray", Left = 428, Top = 92, Width = 150, Height = 32 };
             hide.Click += (s, e) => Hide(); Controls.Add(hide);
-            state.SetBounds(16, 140, 670, 55); Controls.Add(state);
-            history.SetBounds(16, 202, 668, 180); history.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
-            history.HorizontalScrollbar = true; Controls.Add(history);
-            Controls.Add(new Label { Text = "Checks every " + interval + "s. Password/session are held in memory only. Close = tray; Exit via tray menu.", Left = 16, Top = 392, Width = 670, Height = 25, Anchor = AnchorStyles.Bottom | AnchorStyles.Left });
+            Controls.Add(new Label { Text = "Check interval (seconds)", Left = 16, Top = 145, Width = 185 });
+            intervalInput.Name = "IntervalSeconds"; intervalInput.SetBounds(205, 140, 100, 30); intervalInput.Minimum = 5; intervalInput.Maximum = 3600; intervalInput.Value = interval; Controls.Add(intervalInput);
+            var apply = new Button { Name = "ApplyInterval", Text = "Apply", Left = 319, Top = 138, Width = 90, Height = 32 };
+            apply.Click += (s, e) => ApplyInterval(); Controls.Add(apply);
+            preferenceNotice.SetBounds(425, 142, 430, 30); preferenceNotice.Text = "5-3600 seconds. Apply to save for the next launch."; Controls.Add(preferenceNotice);
+            state.SetBounds(16, 182, 848, 47); Controls.Add(state);
+            schedule.SetBounds(16, 231, 848, 26); Controls.Add(schedule);
+            summary.Name = "ProgressSummary"; summary.SetBounds(16, 265, 848, 53); summary.Text = "Waiting for the first successful status response."; Controls.Add(summary);
+            progress.Name = "DiscoveredProgress"; progress.SetBounds(16, 326, 848, 18); progress.Maximum = 1000; progress.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right; Controls.Add(progress);
+            progressNote.SetBounds(16, 350, 848, 45); progressNote.Text = "Progress is based on discovered works, not all matching novels or download bytes."; Controls.Add(progressNote);
+            var tabs = new TabControl { Left = 16, Top = 402, Width = 848, Height = 265, Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right };
+            var jobsPage = new TabPage("Tag checkpoints"); var countsPage = new TabPage("All state counts"); var eventsPage = new TabPage("Notifications");
+            ConfigureGrid(jobs, new[] { "Tag", "State", "Page", "From", "To", "Scanned entries", "Remaining ranges" });
+            ConfigureGrid(counts, new[] { "Kind / state", "Count" });
+            jobsPage.Controls.Add(jobs); countsPage.Controls.Add(counts); history.Dock = DockStyle.Fill; history.HorizontalScrollbar = true; eventsPage.Controls.Add(history);
+            tabs.TabPages.Add(jobsPage); tabs.TabPages.Add(countsPage); tabs.TabPages.Add(eventsPage); Controls.Add(tabs);
+            Controls.Add(new Label { Text = "Password/session stay in memory. Close = tray; Exit via tray menu. Progress refreshes at your interval.", Left = 16, Top = 684, Width = 848, Height = 25, Anchor = AnchorStyles.Bottom | AnchorStyles.Left });
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open monitor", null, (s, e) => ShowMain());
             menu.Items.Add("Exit", null, (s, e) => { quitting = true; Close(); });
@@ -98,12 +215,53 @@ namespace PixivArchiveMonitor {
             tray.DoubleClick += (s, e) => ShowMain();
             timer.Interval = interval * 1000;
             timer.Tick += async (s, e) => await CheckAsync();
+            clock.Interval = 1000; clock.Tick += (s, e) => UpdateClock(); clock.Start();
             Shown += async (s, e) => { monitoring = true; await CheckAsync(); };
             FormClosing += (s, e) => {
                 if (!quitting && e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); }
-                else { quitting = true; monitoring = false; timer.Stop(); if (alert != null) alert.Close(); tray.Visible = false; tray.Dispose(); client.Dispose(); timer.Dispose(); }
+                else { quitting = true; monitoring = false; timer.Stop(); if (alert != null) alert.Close(); tray.Visible = false; tray.Dispose(); client.Dispose(); timer.Dispose(); clock.Stop(); clock.Dispose(); }
             };
             AcceptButton = login;
+        }
+        private static void ConfigureGrid(DataGridView grid, string[] columns) {
+            grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
+            grid.RowHeadersVisible = false; grid.AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.Fill;
+            grid.SelectionMode = DataGridViewSelectionMode.FullRowSelect;
+            foreach (string column in columns) grid.Columns.Add(column, column);
+        }
+        private void ApplyInterval() {
+            interval = (int)intervalInput.Value; timer.Stop(); timer.Interval = interval * 1000;
+            if (monitoring && !busy) ScheduleNext();
+            try { MonitorPreferences.Save(preferencesPath, interval); preferenceNotice.Text = "Saved: " + interval + " seconds (takes effect now)."; }
+            catch (Exception) { preferenceNotice.Text = "Applied for this session; could not save preference."; }
+            UpdateClock();
+        }
+        private void ScheduleNext() { nextCheckUtc = DateTime.UtcNow.AddSeconds(interval); timer.Start(); }
+        private void UpdateClock() {
+            if (quitting) return;
+            string age = lastSuccessUtc == DateTime.MinValue ? "No successful sample yet" : "Last success: " + lastSuccessUtc.ToLocalTime().ToString("HH:mm:ss") + " (" + (long)(DateTime.UtcNow - lastSuccessUtc).TotalSeconds + "s ago)";
+            string next = busy ? "Checking..." : !monitoring ? "Automatic checks paused" : "Next check in " + Math.Max(0, (int)Math.Ceiling((nextCheckUtc - DateTime.UtcNow).TotalSeconds)) + "s";
+            schedule.Text = next + " | " + age + (stale ? " | DATA STALE / UNAVAILABLE" : "");
+            schedule.ForeColor = stale ? Color.DarkOrange : SystemColors.ControlText;
+        }
+        private void DisplayProgress(ProgressSnapshot data) {
+            string mode = !data.DryRun.HasValue ? "Mode unknown" : data.DryRun.Value ? "DRY RUN" : "DOWNLOAD";
+            if (data.CanSummarize) {
+                summary.Text = mode + " | Discovered: " + data.Discovered + " | Completed: " + data.Completed + " | Previewed: " + data.Previewed +
+                    "\r\nSkipped: " + data.Skipped + " | Failed: " + data.Failed + " | Pending/other: " + data.Pending + " | Retry waiting: " + data.RetryWaiting + " | Archive paused: " + (data.Paused.HasValue ? data.Paused.Value.ToString() : "unknown");
+                progress.Value = data.Discovered == 0 ? 0 : Math.Min(1000, (int)(1000m * data.Processed / data.Discovered));
+                progressNote.Text = "Processed " + data.Processed + " / " + data.Discovered + " discovered works (includes skips/failures; search may discover more).\r\nNetwork: " + data.NetworkState;
+            } else {
+                summary.Text = mode + " | This response does not provide enough information to summarize work progress.";
+                progress.Value = 0; progressNote.Text = "Overall total / byte progress unavailable. Network: " + data.NetworkState;
+            }
+            jobs.Rows.Clear();
+            foreach (var pair in data.Jobs) {
+                object remaining; var job = pair.Value;
+                string ranges = job.TryGetValue("remaining", out remaining) && remaining is object[] ? ((object[])remaining).Length.ToString() : "-";
+                jobs.Rows.Add(pair.Key, ProgressSnapshot.Text(job, "state"), ProgressSnapshot.Text(job, "page"), ProgressSnapshot.Text(job, "from"), ProgressSnapshot.Text(job, "to"), ProgressSnapshot.Text(job, "scanned"), ranges);
+            }
+            counts.Rows.Clear(); foreach (var pair in data.Counts) counts.Rows.Add(pair.Key, pair.Value);
         }
         private void ShowMain() { Show(); WindowState = FormWindowState.Normal; Activate(); }
         private void SetState(string message) { if (!quitting) state.Text = message; }
@@ -130,7 +288,7 @@ namespace PixivArchiveMonitor {
         private async Task LoginAsync() {
             if (busy || quitting) return;
             if (String.IsNullOrWhiteSpace(username.Text) || password.Text.Length == 0) { SetState("Enter the downloader administrator username and password (not your Pixiv login)."); return; }
-            timer.Stop(); monitoring = false; busy = true; login.Enabled = false;
+            timer.Stop(); monitoring = false; busy = true; login.Enabled = false; refresh.Enabled = false; UpdateClock();
             try {
                 SetState("Signing in...");
                 string payload = new JavaScriptSerializer().Serialize(new { username = username.Text.Trim(), password = password.Text, rememberMe = false });
@@ -141,17 +299,17 @@ namespace PixivArchiveMonitor {
                 }
                 authNotified = false; monitoring = true; Record("Signed in; monitoring started.");
             } catch (Exception) { if (!quitting) SetState("Login connection failed. Check server/network, then try again."); }
-            finally { busy = false; if (!quitting) login.Enabled = true; }
+            finally { busy = false; if (!quitting) { login.Enabled = true; refresh.Enabled = true; UpdateClock(); } }
             if (monitoring && !quitting) await CheckAsync();
         }
-        private async Task CheckAsync() {
-            if (busy || !monitoring || quitting) return;
-            busy = true; timer.Stop();
+        private async Task CheckAsync(bool manual = false) {
+            if (busy || (!monitoring && !manual) || quitting) return;
+            busy = true; timer.Stop(); refresh.Enabled = false; UpdateClock();
             try {
                 using (var response = await client.GetAsync(endpoint)) {
                     if (quitting) return;
                     if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden) {
-                        monitoring = false;
+                        monitoring = false; stale = true;
                         SetState("Administrator login required (HTTP " + (int)response.StatusCode + "). Enter credentials and click Sign in.");
                         if (!authNotified) { Notify("Monitoring paused: administrator login is required.\r\nOpen the monitor and sign in locally."); authNotified = true; }
                         ShowMain(); return;
@@ -159,12 +317,13 @@ namespace PixivArchiveMonitor {
                     if (!response.IsSuccessStatusCode) throw new HttpRequestException("HTTP status error");
                     var snapshot = Snapshot.Parse(await response.Content.ReadAsStringAsync());
                     if (quitting) return;
-                    SetState(snapshot + "\r\nLast successful check: " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+                    lastSuccessUtc = DateTime.UtcNow; stale = false;
+                    SetState(snapshot.ToString()); DisplayProgress(snapshot.Progress);
                     Notify(tracker.Observe(snapshot));
                 }
             } catch (Exception) {
-                if (!quitting) { SetState("Status check failed at " + DateTime.Now.ToString("HH:mm:ss") + ". Retrying; popup after 3 consecutive failures."); Notify(tracker.Failure()); }
-            } finally { busy = false; if (!quitting && monitoring) timer.Start(); }
+                if (!quitting) { stale = true; SetState("Status check failed at " + DateTime.Now.ToString("HH:mm:ss") + ". Retrying; popup after 3 consecutive failures."); Notify(tracker.Failure()); }
+            } finally { busy = false; if (!quitting) { refresh.Enabled = true; if (monitoring) ScheduleNext(); UpdateClock(); } }
         }
     }
 }

@@ -8,11 +8,29 @@ It does not start, stop, or modify the downloader. No Java, Python, or Maven bui
 1. Keep this folder's files together. Double-click **Start-ArchiveMonitor.cmd** on the computer where you want the notification window.
 2. Enter the **downloader administrator** username and password (the same account used at `http://192.168.31.221:6999/`), then click **Sign in**. Do not enter a Pixiv Cookie or your Pixiv account password.
 3. The session is kept in memory. No password, cookie, or authentication file is saved. Restarting the monitor or an expired session requires signing in again. Authentication uses the target server's `/api/auth/login` endpoint. The supplied endpoint is HTTP, so use it on your trusted LAN; this monitor does not add TLS to that connection.
-4. **Minimize to tray** hides the main window. Closing it with X also hides it; right-click the tray icon and select **Exit** to quit.
+4. Set **Check interval (seconds)** and click **Apply**. The allowed range is **5–3600 seconds**. The first launch defaults to 300 seconds; choose 5 or 10 seconds for frequent progress updates. Changes take effect without restarting.
+5. Watch the progress panel and **Tag checkpoints** tab. **Refresh now** requests an immediate sample, even when automatic monitoring is paused.
+6. **Minimize to tray** hides the main window. Closing it with X also hides it; right-click the tray icon and select **Exit** to quit.
+
+## Progress and saved preferences
+
+The panel refreshes from the status endpoint on each check. It shows:
+
+- Active mode (dry run or real download), archive pause state, and discovered/completed/previewed/skipped/failed/pending/retry work counts.
+- A progress bar for **processed works among currently discovered works**. Processed includes completed, previewed, skipped and failed works. This is not a success percentage, a complete-search percentage, or file-byte progress; the discovered total can grow while search continues.
+- Per-tag saved page, state, date range, scanned entries and remaining date ranges. Scanned entries can overlap between tags and are not a unique download total.
+- All raw kind/state counts, including series and both dry/real namespaces, in a separate tab. The summary uses only the currently active work namespace.
+- Network state and a reported retry time, the last successful sample time/age, and a next-check countdown updated every second.
+
+**Refresh now** does not resume paused automatic checks. Requests never overlap. A failed check leaves the last successful progress visible with a **DATA STALE / UNAVAILABLE** indicator. Missing progress fields are shown as unavailable rather than fabricated zero totals.
+
+This endpoint is polled, not a server push feed. Progress becomes visible at the selected interval plus request time; selecting 300 seconds still means updates approximately every five minutes. The endpoint does not expose the currently transferring filename, downloaded bytes or an overall completion estimate.
+
+Only the interval is saved, per endpoint, in `%LOCALAPPDATA%\PixivArchiveMonitor\interval-<endpoint hash>.json`. No username, password, or session Cookie is saved there. A damaged preference file falls back to 300 seconds. A command-line interval overrides the saved value for that launch; clicking Apply saves the selected value.
 
 ## Notifications
 
-- One status check immediately after startup/login, then **300 seconds after each completed check**. Each request has a 10-second timeout; requests never overlap.
+- One status check immediately after startup/login, then **the selected interval after each completed check**. Each request has a 10-second timeout; requests never overlap.
 - Expected state: exactly `status: "RUNNING"` and boolean `running: true`.
 - The first healthy result is quiet. An initial abnormal result opens a window immediately.
 - A change to either field opens a topmost notification window and plays a sound. Recovery also notifies. An unchanged state does not repeatedly alert.
@@ -39,4 +57,4 @@ The monitor connects directly to the LAN server without using the computer's HTT
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ArchiveMonitor.ps1
 ```
 
-This compiles the actual program and checks status changes, initial abnormal state, connection failure thresholds/recovery, and strict JSON validation. It does not contact your downloader or read credentials. Actual authenticated monitoring requires signing in locally.
+This compiles the actual program and checks status changes, initial abnormal state, connection failure thresholds/recovery, strict JSON validation, active-mode progress totals, preference persistence, and the actual Windows interval/progress controls. It does not contact your downloader or read credentials. Actual authenticated monitoring requires signing in locally.
