@@ -7,7 +7,7 @@ It does not start, stop, or modify the downloader. No Java, Python, or Maven bui
 
 1. Keep this folder's files together. Double-click **Start-ArchiveMonitor.cmd** on the computer where you want the notification window.
 2. Enter the **downloader administrator** username and password (the same account used at `http://192.168.31.221:6999/`), then click **Sign in**. Do not enter a Pixiv Cookie or your Pixiv account password.
-3. The session is kept in memory. No password, cookie, or authentication file is saved. Restarting the monitor or an expired session requires signing in again. Authentication uses the target server's `/api/auth/login` endpoint. The supplied endpoint is HTTP, so use it on your trusted LAN; this monitor does not add TLS to that connection.
+3. Leave **Remember login on this PC** checked when signing in to request the server's persistent administrator session (currently up to 30 days). The monitor saves only `pixiv_session`, encrypted with Windows DPAPI for the current Windows user. It restores that session on the next launch; your password is never saved. Authentication uses the target server's `/api/auth/login` endpoint. The supplied endpoint is HTTP, so use it on your trusted LAN; this monitor does not add TLS to that connection.
 4. Set **Check interval (seconds)** and click **Apply**. The allowed range is **5–3600 seconds**. The first launch defaults to 300 seconds; choose 5 or 10 seconds for frequent progress updates. Changes take effect without restarting.
 5. Watch the progress panel and **Tag checkpoints** tab. **Refresh now** requests an immediate sample, even when automatic monitoring is paused.
 6. **Minimize to tray** hides the main window. Closing it with X also hides it; right-click the tray icon and select **Exit** to quit.
@@ -26,7 +26,17 @@ The panel refreshes from the status endpoint on each check. It shows:
 
 This endpoint is polled, not a server push feed. Progress becomes visible at the selected interval plus request time; selecting 300 seconds still means updates approximately every five minutes. The endpoint does not expose the currently transferring filename, downloaded bytes or an overall completion estimate.
 
-Only the interval is saved, per endpoint, in `%LOCALAPPDATA%\PixivArchiveMonitor\interval-<endpoint hash>.json`. No username, password, or session Cookie is saved there. A damaged preference file falls back to 300 seconds. A command-line interval overrides the saved value for that launch; clicking Apply saves the selected value.
+The interval is saved, per endpoint, in `%LOCALAPPDATA%\PixivArchiveMonitor\interval-<endpoint hash>.json`. That JSON contains no authentication data; remembered sessions use a separate encrypted file described below. A damaged preference file falls back to 300 seconds. A command-line interval overrides the saved value for that launch; clicking Apply saves the selected value.
+
+## Remembered administrator login
+
+- After updating an older monitor, sign in once with **Remember login on this PC** enabled. Old in-memory sessions cannot simply be assigned a longer expiry by this program.
+- Encrypted file: `%LOCALAPPDATA%\PixivArchiveMonitor\session-<endpoint hash>.bin`. It contains the administrator session, endpoint binding and server-issued expiry, protected with Windows DPAPI `CurrentUser`. No plaintext Cookie or password is written to disk, and no credential is placed in the repository.
+- On launch, the monitor restores a decryptable, unexpired session automatically and checks it against the server. It never extends the server's expiry; logout/revocation, expiry, server changes or loss of the Windows encryption context can require signing in again. A damaged file also falls back to the login form.
+- **Forget login** pauses this monitor and removes both its saved Cookie and its in-memory Cookie. It does not log other browsers out or revoke the session on the server. If the saved file cannot be deleted, the monitor reports that failure and its location.
+- Uncheck **Remember login on this PC** to remove the saved copy and continue using the current in-memory login until exit. Signing in with the box unchecked does not save the session.
+- HTTP 401/403 discards the local rejected session and asks for a new login. Network outages do not erase a saved session.
+- Other software running as the same Windows user may be able to use that user's DPAPI protection; this is local credential protection, not a separate password vault.
 
 ## Notifications
 
@@ -57,4 +67,4 @@ The monitor connects directly to the LAN server without using the computer's HTT
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Test-ArchiveMonitor.ps1
 ```
 
-This compiles the actual program and checks status changes, initial abnormal state, connection failure thresholds/recovery, strict JSON validation, active-mode progress totals, preference persistence, and the actual Windows interval/progress controls. It does not contact your downloader or read credentials. Actual authenticated monitoring requires signing in locally.
+This compiles the actual program and checks status changes, initial abnormal state, connection failure thresholds/recovery, strict JSON validation, active-mode progress totals, preference persistence, and the actual Windows interval/progress controls. It does not contact your downloader or read credentials. The tests use fictitious credentials and include DPAPI round-trip, corruption/expiry rejection, encrypted-file replacement/deletion, and remember/forget UI behavior. Actual authenticated monitoring requires signing in locally once.

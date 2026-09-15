@@ -5,8 +5,8 @@ param(
     [switch]$CheckOnly
 )
 $ErrorActionPreference = 'Stop'
-Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http, System.Web.Extensions
-$references = @('System.dll', 'System.Core.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Net.Http.dll', 'System.Web.Extensions.dll')
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing, System.Net.Http, System.Web.Extensions, System.Security
+$references = @('System.dll', 'System.Core.dll', 'System.Windows.Forms.dll', 'System.Drawing.dll', 'System.Net.Http.dll', 'System.Web.Extensions.dll', 'System.Security.dll')
 try {
     Add-Type -Path (Join-Path $PSScriptRoot 'ArchiveMonitor.cs') -ReferencedAssemblies $references
     if ($CheckOnly) { Write-Output 'Monitor compiled successfully.'; return }

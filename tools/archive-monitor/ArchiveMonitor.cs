@@ -113,6 +113,47 @@ namespace PixivArchiveMonitor {
         }
     }
 
+    public static class SessionVault {
+        public static string FilePath(Uri endpoint, string root) {
+            return Path.Combine(root, Path.GetFileName(MonitorPreferences.FilePath(endpoint.AbsoluteUri, root)).Replace("interval-", "session-").Replace(".json", ".bin"));
+        }
+        public static void Save(string path, Uri endpoint, Cookie cookie) {
+            if (cookie == null || cookie.Name != "pixiv_session" || cookie.Expired || String.IsNullOrEmpty(cookie.Value) ||
+                cookie.Expires == DateTime.MinValue || cookie.Expires.ToUniversalTime() <= DateTime.UtcNow)
+                throw new ArgumentException("A valid persistent administrator session is required.");
+            byte[] plain = Encoding.UTF8.GetBytes(new JavaScriptSerializer().Serialize(new {
+                version = 1, endpoint = endpoint.AbsoluteUri, value = cookie.Value, expiresUtcTicks = cookie.Expires.ToUniversalTime().Ticks
+            }));
+            byte[] encrypted;
+            try { encrypted = ProtectedData.Protect(plain, Encoding.UTF8.GetBytes(endpoint.AbsoluteUri), DataProtectionScope.CurrentUser); }
+            finally { Array.Clear(plain, 0, plain.Length); }
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            string temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try {
+                File.WriteAllBytes(temp, encrypted);
+                if (File.Exists(path)) File.Replace(temp, path, null); else File.Move(temp, path);
+            } finally { if (File.Exists(temp)) File.Delete(temp); }
+        }
+        public static Cookie Load(string path, Uri endpoint) {
+            if (!File.Exists(path)) return null;
+            byte[] plain = null;
+            try {
+                if (new FileInfo(path).Length > 65536) return null;
+                plain = ProtectedData.Unprotect(File.ReadAllBytes(path), Encoding.UTF8.GetBytes(endpoint.AbsoluteUri), DataProtectionScope.CurrentUser);
+                var data = new JavaScriptSerializer().DeserializeObject(Encoding.UTF8.GetString(plain)) as Dictionary<string, object>;
+                if (data == null || !data.ContainsKey("version") || !(data["version"] is int) || (int)data["version"] != 1 ||
+                    !data.ContainsKey("endpoint") || !String.Equals(data["endpoint"] as string, endpoint.AbsoluteUri, StringComparison.Ordinal) ||
+                    !data.ContainsKey("value") || !(data["value"] is string) || String.IsNullOrEmpty((string)data["value"]) ||
+                    !data.ContainsKey("expiresUtcTicks") || !(data["expiresUtcTicks"] is long)) return null;
+                var expiry = new DateTime((long)data["expiresUtcTicks"], DateTimeKind.Utc);
+                if (expiry <= DateTime.UtcNow) return null;
+                return new Cookie("pixiv_session", (string)data["value"], "/") { Expires = expiry, HttpOnly = true, Secure = endpoint.Scheme == "https" };
+            } catch (Exception) { return null; }
+            finally { if (plain != null) Array.Clear(plain, 0, plain.Length); }
+        }
+        public static void Delete(string path) { if (File.Exists(path)) File.Delete(path); }
+    }
+
     // Network faults must be consecutive. No repeated notification for an unchanged pair.
     public sealed class ChangeTracker {
         private Snapshot previous;
@@ -137,6 +178,11 @@ namespace PixivArchiveMonitor {
     public sealed class MonitorWindow : Form {
         private readonly Uri endpoint;
         private readonly HttpClient client;
+        private readonly CookieContainer cookies = new CookieContainer();
+        private readonly CheckBox remember = new CheckBox();
+        private readonly Button forget = new Button();
+        private readonly string sessionPath;
+        private string savedSessionSignature;
         private readonly Timer timer = new Timer();
         private readonly Timer clock = new Timer();
         private readonly ChangeTracker tracker = new ChangeTracker();
@@ -172,7 +218,10 @@ namespace PixivArchiveMonitor {
             if (seconds != 0 && (seconds < 5 || seconds > 3600)) throw new ArgumentException("Interval must be 5 to 3600 seconds.");
             preferencesPath = MonitorPreferences.FilePath(endpoint.ToString(), Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PixivArchiveMonitor"));
             interval = seconds == 0 ? MonitorPreferences.Load(preferencesPath, 300) : seconds;
-            var handler = new HttpClientHandler { CookieContainer = new CookieContainer(), UseCookies = true,
+            sessionPath = SessionVault.FilePath(endpoint, Path.GetDirectoryName(preferencesPath));
+            var restored = SessionVault.Load(sessionPath, endpoint);
+            if (restored != null) { cookies.Add(endpoint, restored); savedSessionSignature = restored.Value + "/" + restored.Expires.ToUniversalTime().Ticks; }
+            var handler = new HttpClientHandler { CookieContainer = cookies, UseCookies = true,
                 AllowAutoRedirect = false, UseProxy = false };
             client = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(10), MaxResponseContentBufferSize = 1024 * 1024 };
             client.DefaultRequestHeaders.Add("Cache-Control", "no-cache");
@@ -185,6 +234,10 @@ namespace PixivArchiveMonitor {
             Controls.Add(new Label { Text = "Password", Left = 350, Top = 53, Width = 80 });
             password.SetBounds(430, 49, 180, 28); password.UseSystemPasswordChar = true; password.MaxLength = 1024; Controls.Add(password);
             login.Text = "Sign in"; login.SetBounds(624, 47, 100, 32); login.Click += async (s, e) => await LoginAsync(); Controls.Add(login);
+            forget.Name = "ForgetSession"; forget.Text = "Forget login"; forget.SetBounds(736, 47, 128, 32);
+            forget.Click += (s, e) => { if (!busy) { monitoring = false; timer.Stop(); bool removed = ForgetSession(); remember.Checked = false; SetState(removed ? "Saved and in-memory login removed. Sign in to resume monitoring." : "In-memory login removed, but encrypted file could not be deleted. See Notifications."); UpdateClock(); } }; Controls.Add(forget);
+            remember.Name = "RememberSession"; remember.Text = "Remember login on this PC"; remember.Checked = true; remember.SetBounds(592, 93, 272, 30);
+            remember.CheckedChanged += (s, e) => { if (!remember.Checked) { if (DeleteSavedSession()) Record("Session will not be kept after exit."); else SetState("Could not delete saved login. See Notifications for the file location."); } else { Record("Sign in again to request and remember a long-lived session."); } }; Controls.Add(remember);
             start.Text = "Start"; start.SetBounds(16, 92, 100, 32); start.Click += async (s, e) => { if (!busy) { monitoring = true; await CheckAsync(); } }; Controls.Add(start);
             stop.Text = "Pause monitor"; stop.SetBounds(130, 92, 140, 32); stop.Click += (s, e) => { monitoring = false; timer.Stop(); nextCheckUtc = DateTime.MinValue; SetState("Monitor paused locally. The downloader is unchanged."); UpdateClock(); }; Controls.Add(stop);
             refresh.Name = "RefreshNow"; refresh.Text = "Refresh now"; refresh.SetBounds(284, 92, 130, 32);
@@ -207,7 +260,7 @@ namespace PixivArchiveMonitor {
             ConfigureGrid(counts, new[] { "Kind / state", "Count" });
             jobsPage.Controls.Add(jobs); countsPage.Controls.Add(counts); history.Dock = DockStyle.Fill; history.HorizontalScrollbar = true; eventsPage.Controls.Add(history);
             tabs.TabPages.Add(jobsPage); tabs.TabPages.Add(countsPage); tabs.TabPages.Add(eventsPage); Controls.Add(tabs);
-            Controls.Add(new Label { Text = "Password/session stay in memory. Close = tray; Exit via tray menu. Progress refreshes at your interval.", Left = 16, Top = 684, Width = 848, Height = 25, Anchor = AnchorStyles.Bottom | AnchorStyles.Left });
+            Controls.Add(new Label { Text = "Remembered login is encrypted for your Windows account. Password is never saved. Close = tray; Exit via tray.", Left = 16, Top = 684, Width = 848, Height = 25, Anchor = AnchorStyles.Bottom | AnchorStyles.Left });
             var menu = new ContextMenuStrip();
             menu.Items.Add("Open monitor", null, (s, e) => ShowMain());
             menu.Items.Add("Exit", null, (s, e) => { quitting = true; Close(); });
@@ -222,6 +275,8 @@ namespace PixivArchiveMonitor {
                 else { quitting = true; monitoring = false; timer.Stop(); if (alert != null) alert.Close(); tray.Visible = false; tray.Dispose(); client.Dispose(); timer.Dispose(); clock.Stop(); clock.Dispose(); }
             };
             AcceptButton = login;
+            if (restored != null) Record("Restored encrypted administrator session; checking server validity.");
+            else if (File.Exists(sessionPath)) Record("Saved session expired or could not be decrypted. Sign in again.");
         }
         private static void ConfigureGrid(DataGridView grid, string[] columns) {
             grid.Dock = DockStyle.Fill; grid.ReadOnly = true; grid.AllowUserToAddRows = false; grid.AllowUserToDeleteRows = false;
@@ -285,31 +340,52 @@ namespace PixivArchiveMonitor {
             alert.Show(); alert.BringToFront();
             System.Media.SystemSounds.Exclamation.Play();
         }
+        private bool DeleteSavedSession() {
+            savedSessionSignature = null;
+            try { SessionVault.Delete(sessionPath); return true; }
+            catch (Exception) { Record("Could not remove encrypted session file. Check access to " + sessionPath); return false; }
+        }
+        private bool ForgetSession() {
+            bool removed = DeleteSavedSession();
+            cookies.Add(endpoint, new Cookie("pixiv_session", "", "/") { Expires = DateTime.UtcNow.AddDays(-1), Expired = true });
+            stale = true; return removed;
+        }
+        private void SaveSession() {
+            if (!remember.Checked) return;
+            Cookie cookie = cookies.GetCookies(endpoint)["pixiv_session"];
+            if (cookie == null) return;
+            string signature = cookie.Value + "/" + cookie.Expires.ToUniversalTime().Ticks;
+            if (signature == savedSessionSignature) return;
+            try { SessionVault.Save(sessionPath, endpoint, cookie); savedSessionSignature = signature; Record("Administrator session saved with Windows account encryption."); }
+            catch (Exception) { Record("Session could not be saved. Monitoring continues in memory; sign in with Remember login enabled to retry."); }
+        }
         private async Task LoginAsync() {
             if (busy || quitting) return;
             if (String.IsNullOrWhiteSpace(username.Text) || password.Text.Length == 0) { SetState("Enter the downloader administrator username and password (not your Pixiv login)."); return; }
-            timer.Stop(); monitoring = false; busy = true; login.Enabled = false; refresh.Enabled = false; UpdateClock();
+            timer.Stop(); monitoring = false; busy = true; login.Enabled = false; refresh.Enabled = false; forget.Enabled = false; remember.Enabled = false; UpdateClock();
             try {
                 SetState("Signing in...");
-                string payload = new JavaScriptSerializer().Serialize(new { username = username.Text.Trim(), password = password.Text, rememberMe = false });
+                string payload = new JavaScriptSerializer().Serialize(new { username = username.Text.Trim(), password = password.Text, rememberMe = remember.Checked });
                 password.Clear();
                 using (var content = new StringContent(payload, Encoding.UTF8, "application/json"))
                 using (var response = await client.PostAsync(new Uri(endpoint, "/api/auth/login"), content)) {
                     if (!response.IsSuccessStatusCode) { SetState("Login failed: HTTP " + (int)response.StatusCode + ". Check credentials; repeated attempts may be limited."); return; }
                 }
+                if (quitting) return;
+                if (remember.Checked) SaveSession(); else DeleteSavedSession();
                 authNotified = false; monitoring = true; Record("Signed in; monitoring started.");
             } catch (Exception) { if (!quitting) SetState("Login connection failed. Check server/network, then try again."); }
-            finally { busy = false; if (!quitting) { login.Enabled = true; refresh.Enabled = true; UpdateClock(); } }
+            finally { busy = false; if (!quitting) { login.Enabled = true; refresh.Enabled = true; forget.Enabled = true; remember.Enabled = true; UpdateClock(); } }
             if (monitoring && !quitting) await CheckAsync();
         }
         private async Task CheckAsync(bool manual = false) {
             if (busy || (!monitoring && !manual) || quitting) return;
-            busy = true; timer.Stop(); refresh.Enabled = false; UpdateClock();
+            busy = true; timer.Stop(); refresh.Enabled = false; forget.Enabled = false; remember.Enabled = false; UpdateClock();
             try {
                 using (var response = await client.GetAsync(endpoint)) {
                     if (quitting) return;
                     if (response.StatusCode == HttpStatusCode.Unauthorized || response.StatusCode == HttpStatusCode.Forbidden) {
-                        monitoring = false; stale = true;
+                        monitoring = false; stale = true; ForgetSession();
                         SetState("Administrator login required (HTTP " + (int)response.StatusCode + "). Enter credentials and click Sign in.");
                         if (!authNotified) { Notify("Monitoring paused: administrator login is required.\r\nOpen the monitor and sign in locally."); authNotified = true; }
                         ShowMain(); return;
@@ -317,13 +393,13 @@ namespace PixivArchiveMonitor {
                     if (!response.IsSuccessStatusCode) throw new HttpRequestException("HTTP status error");
                     var snapshot = Snapshot.Parse(await response.Content.ReadAsStringAsync());
                     if (quitting) return;
-                    lastSuccessUtc = DateTime.UtcNow; stale = false;
+                    lastSuccessUtc = DateTime.UtcNow; stale = false; SaveSession();
                     SetState(snapshot.ToString()); DisplayProgress(snapshot.Progress);
                     Notify(tracker.Observe(snapshot));
                 }
             } catch (Exception) {
                 if (!quitting) { stale = true; SetState("Status check failed at " + DateTime.Now.ToString("HH:mm:ss") + ". Retrying; popup after 3 consecutive failures."); Notify(tracker.Failure()); }
-            } finally { busy = false; if (!quitting) { refresh.Enabled = true; if (monitoring) ScheduleNext(); UpdateClock(); } }
+            } finally { busy = false; if (!quitting) { refresh.Enabled = true; forget.Enabled = true; remember.Enabled = true; if (monitoring) ScheduleNext(); UpdateClock(); } }
         }
     }
 }

@@ -78,6 +78,24 @@ try {
     Assert-True ($window.Controls.Find('ProgressSummary', $true)[0].Text.Contains('Completed: 12')) 'Real progress UI must show completed count'
     Assert-True ($type.GetField('jobs', $flags).GetValue($window).Rows.Count -eq 2) 'Real progress grid must contain tag rows'
     Assert-True ($window.Controls.Find('RefreshNow', $true).Count -eq 1) 'Manual refresh must be available'
+    $sessionEndpoint = [Uri]'http://test.invalid/status'
+    $sessionFile = [PixivArchiveMonitor.SessionVault]::FilePath($sessionEndpoint, $testRoot)
+    $type.GetField('sessionPath', $flags).SetValue($window, $sessionFile)
+    $rememberControl = $window.Controls.Find('RememberSession', $true)[0]
+    Assert-True $rememberControl.Checked 'Remember session is enabled by default'
+    $sessionCookie = [Net.Cookie]::new('pixiv_session', 'monitor-fixture-not-a-real-session', '/')
+    $sessionCookie.Expires = [DateTime]::UtcNow.AddDays(30)
+    $jar = $type.GetField('cookies', $flags).GetValue($window)
+    $jar.Add($sessionEndpoint, $sessionCookie)
+    [void]$type.GetMethod('SaveSession', $flags).Invoke($window, @())
+    Assert-True (Test-Path $sessionFile) 'Remembered UI login must be saved'
+    $rememberControl.Checked = $false
+    Assert-True (-not (Test-Path $sessionFile) -and $null -ne $jar.GetCookies($sessionEndpoint)['pixiv_session']) 'Unchecking remember removes disk copy but keeps current login'
+    $rememberControl.Checked = $true
+    [void]$type.GetMethod('SaveSession', $flags).Invoke($window, @())
+    [void]$type.GetMethod('ForgetSession', $flags).Invoke($window, @())
+    Assert-True (-not (Test-Path $sessionFile) -and $null -eq $jar.GetCookies($sessionEndpoint)['pixiv_session']) 'Forget login removes both saved and in-memory session'
+
 } finally {
     if ($null -ne $window) {
         $type.GetField('tray', $flags).GetValue($window).Dispose()
@@ -88,4 +106,40 @@ try {
     }
     if (Test-Path $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
 }
-Write-Output 'PASS: 21 additional progress, preference, and Windows UI checks (37 total).'
+Write-Output 'PASS: 25 progress, preference, and Windows UI checks (41 total so far).'
+
+$vaultRoot = Join-Path ([IO.Path]::GetTempPath()) ('pixiv-monitor-vault-' + [guid]::NewGuid().ToString('N'))
+$origin = [Uri]'http://fixture.invalid/api/novel/archive/status'
+$vault = [PixivArchiveMonitor.SessionVault]::FilePath($origin, $vaultRoot)
+try {
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)) 'Missing session requires login'
+    $cookie = [Net.Cookie]::new('pixiv_session', 'fake-test-cookie-no-real-credentials', '/')
+    $cookie.Expires = [DateTime]::UtcNow.AddDays(30)
+    [PixivArchiveMonitor.SessionVault]::Save($vault, $origin, $cookie)
+    $bytes = [IO.File]::ReadAllBytes($vault)
+    Assert-True (-not [Text.Encoding]::UTF8.GetString($bytes).Contains($cookie.Value)) 'Saved cookie must not be plaintext'
+    $loaded = [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)
+    Assert-True ($loaded.Value -eq $cookie.Value -and $loaded.Name -eq 'pixiv_session') 'DPAPI round trip must restore session'
+    Assert-True ([Math]::Abs(($loaded.Expires.ToUniversalTime() - $cookie.Expires.ToUniversalTime()).TotalSeconds) -lt 1) 'Server expiry must not be extended'
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, [Uri]'http://other.invalid/api/novel/archive/status')) 'Cookie cannot be decrypted for another endpoint'
+    $bytes[[int]($bytes.Length / 2)] = $bytes[[int]($bytes.Length / 2)] -bxor 1
+    [IO.File]::WriteAllBytes($vault, $bytes)
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)) 'Tampered ciphertext must be rejected without crashing'
+    [IO.File]::WriteAllBytes($vault, [byte[]](1,2,3))
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)) 'Unreadable ciphertext must require login'
+    $expired = @{version=1;endpoint=$origin.AbsoluteUri;value='expired-fixture';expiresUtcTicks=[DateTime]::UtcNow.AddDays(-1).Ticks} | ConvertTo-Json -Compress
+    $encrypted = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($expired), [Text.Encoding]::UTF8.GetBytes($origin.AbsoluteUri), [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    [IO.File]::WriteAllBytes($vault, $encrypted)
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)) 'Expired session must not be restored'
+    $cookie.Value = 'new-fake-session'
+    [PixivArchiveMonitor.SessionVault]::Save($vault, $origin, $cookie)
+    Assert-True ([PixivArchiveMonitor.SessionVault]::Load($vault, $origin).Value -eq $cookie.Value) 'New session replaces the old saved session'
+    $rejected = $false
+    try { [PixivArchiveMonitor.SessionVault]::Save($vault, $origin, [Net.Cookie]::new('pixiv_session', 'temporary-fixture', '/')) } catch { $rejected = $true }
+    Assert-True $rejected 'Temporary cookie must not be given a fabricated long expiry'
+    [PixivArchiveMonitor.SessionVault]::Delete($vault)
+    Assert-True (-not (Test-Path $vault)) 'Deleting remembered login removes encrypted file'
+    [PixivArchiveMonitor.SessionVault]::Delete($vault)
+    Assert-True ($null -eq [PixivArchiveMonitor.SessionVault]::Load($vault, $origin)) 'Deleting absent login is harmless'
+} finally { if (Test-Path $vaultRoot) { Remove-Item -LiteralPath $vaultRoot -Recurse -Force } }
+Write-Output 'PASS: 12 DPAPI session-vault checks (53 total).'
