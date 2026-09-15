@@ -2,6 +2,8 @@
 
 ## 小说标签归档 v0.1
 
+独立 Windows 状态监控器：见 [安装与使用](tools/archive-monitor/README.md)。双击 `tools/archive-monitor/Start-ArchiveMonitor.cmd`，在本机输入下载器管理员账号；默认每 300 秒检查一次，状态变化时弹窗提醒。
+
 本分支基于 [Sywyar/PixivDownloader](https://github.com/Sywyar/PixivDownloader) 扩展：多标签共享黑名单、跨标签去重、系列默认前 10 章自动合并、默认仅下载封面，以及慢速后台下载和持久化断点恢复。暂不跟踪系列更新。
 
 请先阅读 [归档启动与升级指南](docs/novel-archive/README.md)。Windows 启动入口为 `scripts/start-novel-archive.ps1`，源码构建入口为 `scripts/build-novel-archive.ps1`。运行数据应保存在固定的独立目录，升级时保留该目录及下载根目录。
