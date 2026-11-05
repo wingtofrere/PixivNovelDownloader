@@ -16,4 +16,4 @@ concurrency:
 jobs:
   quality-gate:
     if: github.event.action != 'edited' || github.event.changes.base != null
-    uses: Sywyar/PixivDownloader/.github/workflows/quality-gate.yml@master
+    uses: ./.github/workflows/quality-gate.yml
